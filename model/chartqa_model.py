@@ -21,11 +21,12 @@ class ChartQAModule(pl.LightningModule):
         self.model = model
         self.train_dataset = train_dataset
         self.val_dataset = val_dataset
-        self.args=args
+        self.args = args
+        self.validation_outputs = []
 
     def training_step(self, batch, batch_idx):
         pixel_values, decoder_input_ids, labels = batch
-        
+
         outputs = self.model(pixel_values,
                              decoder_input_ids=decoder_input_ids[:, :-1],
                              labels=labels[:, 1:])
@@ -34,12 +35,12 @@ class ChartQAModule(pl.LightningModule):
         return loss
 
     def compute_metric(self, gt, pred):
-      try:
-        gt = float(gt)
-        pred = float(pred)
-        return abs(gt - pred) / abs(gt) <= 0.05
-      except:
-        return str(gt).lower() == str(pred).lower()
+        try:
+            gt = float(gt)
+            pred = float(pred)
+            return abs(gt - pred) / abs(gt) <= 0.05
+        except:
+            return str(gt).lower() == str(pred).lower()
 
     def validation_step(self, batch, batch_idx, dataset_idx=0):
         pixel_values, decoder_input_ids, prompt_end_idxs, answers = batch
@@ -47,42 +48,40 @@ class ChartQAModule(pl.LightningModule):
             [input_id[: end_idx + 1] for input_id, end_idx in zip(decoder_input_ids, prompt_end_idxs)],
             batch_first=True,
         )
-        
+
         outputs = self.model.generate(pixel_values,
-                                   decoder_input_ids=decoder_prompts,
-                                   max_length=self.args.max_length,
-                                   early_stopping=True,
-                                   pad_token_id=self.processor.tokenizer.pad_token_id,
-                                   eos_token_id=self.processor.tokenizer.eos_token_id,
-                                   use_cache=True,
-                                   num_beams=4,
-                                   bad_words_ids=[[self.processor.tokenizer.unk_token_id]],
-                                   return_dict_in_generate=True,)
-    
+                                      decoder_input_ids=decoder_prompts,
+                                      max_length=self.args.max_length,
+                                      early_stopping=True,
+                                      pad_token_id=self.processor.tokenizer.pad_token_id,
+                                      eos_token_id=self.processor.tokenizer.eos_token_id,
+                                      use_cache=True,
+                                      num_beams=4,
+                                      bad_words_ids=[[self.processor.tokenizer.unk_token_id]],
+                                      return_dict_in_generate=True, )
+
         predictions = []
         for seq in self.processor.tokenizer.batch_decode(outputs.sequences):
             seq = seq.replace(self.processor.tokenizer.eos_token, "").replace(self.processor.tokenizer.pad_token, "")
             predictions.append(seq)
 
-        scores = list()
+        scores = []
         for pred, answer in zip(predictions, answers):
-            pred = pred.split("<s_answer>")[1] 
+            pred = pred.split("<s_answer>")[1]
             pred = pred.replace(self.processor.tokenizer.eos_token, "").replace("<s>", "").strip(' ')
-            answer = answer.split("<s_answer>")[1] 
+            answer = answer.split("<s_answer>")[1]
             answer = answer.replace(self.processor.tokenizer.eos_token, "").strip(' ')
             if self.compute_metric(answer, pred):
-              scores.append(1)
+                scores.append(1)
             else:
-              scores.append(0)
+                scores.append(0)
 
-        return scores
+        self.validation_outputs.append(scores)
 
-    def validation_epoch_end(self, validation_step_outputs):
-        # I set this to 1 manually
-        # (previously set to len(self.config.dataset_name_or_paths))
+    def on_validation_epoch_end(self):
         num_of_loaders = 1
         if num_of_loaders == 1:
-            validation_step_outputs = [validation_step_outputs]
+            validation_step_outputs = [self.validation_outputs]
         assert len(validation_step_outputs) == num_of_loaders
         cnt = [0] * num_of_loaders
         total_metric = [0] * num_of_loaders
@@ -95,7 +94,9 @@ class ChartQAModule(pl.LightningModule):
             val_metric_name = f"val_metric_{i}th_dataset"
             self.log_dict({val_metric_name: val_metric[i]}, sync_dist=True)
         self.log_dict({"val_metric": np.sum(total_metric) / np.sum(cnt)}, sync_dist=True)
-        print("Epoch:", str(self.current_epoch), "Step:", str(self.global_step), "Validation Metric:", str(np.sum(total_metric) / np.sum(cnt)))
+        print("Epoch:", str(self.current_epoch), "Step:", str(self.global_step), "Validation Metric:",
+              str(np.sum(total_metric) / np.sum(cnt)))
+        self.validation_outputs = []  # Reset for the next epoch
 
     def configure_optimizers(self):
 
@@ -104,11 +105,13 @@ class ChartQAModule(pl.LightningModule):
         if int(self.config.get("max_epochs", -1)) > 0:
             assert len(self.config.get("train_batch_sizes")) == 1, "Set max_epochs only if the number of datasets is 1"
             max_iter = (self.config.get("max_epochs") * self.config.get("num_training_samples_per_epoch")) / (
-                self.config.get("train_batch_sizes")[0] * torch.cuda.device_count() * self.config.get("num_nodes", 1)
+                    self.config.get("train_batch_sizes")[0] * torch.cuda.device_count() * self.config.get("num_nodes",
+                                                                                                          1)
             )
 
         if int(self.config.get("max_steps", -1)) > 0:
-            max_iter = min(self.config.get("max_steps"), max_iter) if max_iter is not None else self.config.get("max_steps")
+            max_iter = min(self.config.get("max_steps"), max_iter) if max_iter is not None else self.config.get(
+                "max_steps")
 
         assert max_iter is not None
         optimizer = torch.optim.Adam(self.parameters(), lr=self.config.get("lr"))
@@ -131,13 +134,16 @@ class ChartQAModule(pl.LightningModule):
         return LambdaLR(optimizer, lr_lambda)
 
     def train_dataloader(self):
-        return DataLoader(self.train_dataset, batch_size=self.args.batch_size, shuffle=True, num_workers=self.args.num_workers)
+        return DataLoader(self.train_dataset, batch_size=self.args.batch_size, shuffle=True,
+                          num_workers=self.args.num_workers)
 
     def val_dataloader(self):
-        return DataLoader(self.val_dataset, batch_size=self.args.valid_batch_size, shuffle=False, num_workers=self.args.num_workers)
+        return DataLoader(self.val_dataset, batch_size=self.args.valid_batch_size, shuffle=False,
+                          num_workers=self.args.num_workers)
 
     @rank_zero_only
     def on_save_checkpoint(self, checkpoint):
-        save_path = os.path.join(self.config['result_path'], 'chartqa-checkpoint-epoch='+str(self.current_epoch)+'-'+str(self.global_step))
+        save_path = os.path.join(self.config['result_path'],
+                                 'chartqa-checkpoint-epoch=' + str(self.current_epoch) + '-' + str(self.global_step))
         self.model.save_pretrained(save_path)
         self.processor.save_pretrained(save_path)
