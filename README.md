@@ -1,15 +1,15 @@
 # Fine-Tuning UniChart on ChartQA dataset
 
-UniChart fine-tuning on ChartQA dataset.
-Вступление
+## Вступление
 В данном ноутбуке представлен процесс дообучения модели UniChart на датасете ChartQA.
 
 Цель: решение задачи Chart Question Answering с помощью VLM (Vision Language Model)
 
 Ссылки на ресурсы и авторов модели и датасета, использованных в ходе работы будут в конце ноутбука.
 
-Структура VLM
-Архитектура Vision Language Models (VLM)
+## Структура VLM
+
+###Архитектура Vision Language Models (VLM)
 1. Кодировщик изображений (Image Encoder):
 
 Кодирует изображение в векторное представление, которое может быть обработано нейронной сетью. Обычно используется модель типа CNN или трансформер.
